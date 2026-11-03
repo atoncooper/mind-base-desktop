@@ -1,280 +1,120 @@
 # MindBase Desktop
 
-Fully-local desktop companion of [MindBase](../..): a personal knowledge base that runs entirely on
-your machine. Built with Tauri 2 + React 19 + TypeScript — no backend service is required and all
-data stays in local storage.
+[![CI](https://github.com/atoncooper/mind-base-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/atoncooper/mind-base-desktop/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Architecture
+> MindBase 的**完全本地桌面端**（Tauri 2 + React 19 + Rust）：数据只存在本机 SQLite，
+> 不依赖任何后端服务，装好即可离线使用个人知识库与本地 Agent 工作台。
 
-The Rust shell (`src-tauri/src/`) is split into domain **packages** — one directory plus a
-`mod.rs` front door per package — mirroring the backend's service layering. The authoritative
-layout, dependency rules and splitting conventions live in
-[docs/desktop-rust-architecture.md](../docs/desktop-rust-architecture.md).
+## 简介
 
-```
-React UI (src/)                     Rust packages (src-tauri/src/)
-┌──────────────────┐   Tauri IPC   ┌──────────────────────────────────────────┐
-│ ChatView / Quiz  │ ────────────► │ app/         shell · setup · tray · IPC  │
-│ NotesView / …    │ ◄── events ── │  ├ workspace/  notes·quiz·mindmap·…      │
-└──────────────────┘               │  ├ agent/      harness·chat·skills·tools │
-                                   │  ├ knowledge/  bilibili·ingest·vectors   │
-                                   │  ├ media/      asr·whisper·ocr·ffmpeg    │
-                                   │  ├ llm/        providers·client·embed    │
-                                   │  └ infra/      sqlite·config·logging     │
-                                   └──────────────────────────────────────────┘
-```
+MindBase Desktop 把 B 站收藏与本地文档变成可检索、可问答、可复习的个人知识库，并把「聊天 Agent、笔记、题目、思维导图/白板、科研工作台、简历/幻灯片、长任务自动化」全部做进一个桌面应用。它沿用 MindBase Web 端的 Agent harness / RAG 设计思路，但按单机形态重写：没有账号体系、没有多用户服务端，不需要部署任何容器或数据库。
 
-- **app/** — Tauri shell only: builder assembly, startup wiring, tray and the single IPC
-  registry (`app/commands.rs`). No business logic.
-- **agent/** — the local AgentHarness (orchestrator / lifecycle / registry / runtime /
-  scheduler / tools), agent descriptors sharing one generic ReAct loop, chat sessions,
-  editable prompt defaults, skill packs and the web-search tool. Sub-agents are reached only
-  through `delegate_to_agent` (memory / note / code / search), depth-capped at two levels.
-  The summary agent runs as a standalone streaming command (`chat_summarize`).
-- **knowledge/** — Bilibili acquisition (QR login, favorites, WBI-signed content), ingestion
-  (transcribe → rule-based chunking → embed → store), local document import, URL capture, and
-  the SQLite vector store with FTS hybrid retrieval.
-- **media/** — media runtimes: cloud DashScope ASR + realtime WebSocket, managed local
-  faster-whisper / OCR sidecars, ffmpeg resolution and the audio cache quota.
-- **llm/** — outbound model access: provider catalog, credentials and egress proxy, the
-  streaming chat client (OpenAI-compatible + Anthropic), embeddings and rerank.
-- **workspace/** — user-facing document domains: notes, quiz, mind map, research, manuscript,
-  literature, dataset, resume and slides.
-- **infra/** — SQLite (schema + migrations + data-directory relocation), config, file logging,
-  conversation artifacts on disk, embedded Python provisioning and the signed updater.
-- **Local data** — everything (documents, chunks, vectors, notes, revisions, sessions, summaries)
-  lives in one SQLite database under the data directory; the vector store is brute-force cosine.
+核心取舍是**隐私与零运维**：文档、向量、笔记、会话、API Key、思维导图都保存在本机一个可迁移的数据目录里；唯一的出网行为是调用你自己配置的模型供应商（DashScope / OpenRouter / DeepSeek 等）、B 站数据接口与 GitHub 更新检查。API Key 只存在本地 SQLite 的 `api_keys` 表，前端只能看到掩码预览，日志不记录原始 Key。
 
+与 Web 端（[atoncooper/MindBase](https://github.com/atoncooper/MindBase)）是**同源演进的两个产品**：Web 端面向服务器上的多用户/共享场景，本仓库是纯本地单机版本。**两端数据互不相通**——没有账号同步、没有云端同步；桌面端数据不会上传到 Web 端，Web 端数据也不会下载到桌面端。
 
-## Data directory
+## 核心功能
 
-The SQLite database lives under a single data directory. The default location is the OS app-data
-folder; it can be moved to any folder from the 数据存储 card in the app (with optional data
-migration, or a fresh empty database). The choice is persisted via a pointer file
-(`data-location.json`) inside the *default* directory, so it survives restarts; if the custom
-location becomes unusable, startup self-heals back to the default instead of failing.
+### 本地知识库与检索
 
-## API keys
+- **B 站收藏 → 知识库**：扫码登录、同步收藏夹，按分 P 入库（AI 大纲 → 音频 → ASR → 规则切块 → 向量化），本地 SQLite 存储，换机/迁移只需搬数据目录。
+- **混合检索**：BM25 + 向量余弦的 RRF 融合检索，可选 DashScope `gte-rerank` 精排；失败自动回退融合顺序。
+- **多来源导入**：本地/云文档支持 PDF、Word、PPT、HTML、Markdown、TXT 等，图片文字走 OCR；内置 FFmpeg/ffprobe sidecar 处理音视频。
+- **ASR 双模式**：云端 DashScope，或内置嵌入式 Python 的本地 faster-whisper（无需 API Key，模型权重首次使用时下载）。
 
-Provider API keys (DashScope / OpenRouter) are stored in the `api_keys` table of the same local
-SQLite database. Raw keys never leave the Rust layer — the UI only ever receives masked previews
-(`sk-…wxyz`) — and keys are never logged.
+### Agent 对话
 
-## 本机命令执行（run_command，默认关闭）
+- **多 Agent 编排**：本地 ReAct harness + `delegate_to_agent` 子代理（memory / note / code / search / academic 等），支持 plan、`ask_user` 结构化交互、会话级并发锁与熔断。
+- **过程可见**：思考过程流式展示、工具步骤、产物卡片（简历/幻灯片等文件可一键打开）、后台任务状态、token 用量统计。
+- **联网能力**：`web_search` / `web_crawl`（DeepSeek Search/Fetch 优先，回退 SearxNG → Bing → Baidu）+ 网页正文抓取。
+- **本机执行**：文件读写限制在 Agent 目录；`run_command`（默认关闭，三套 shell）与 `run_sandboxed`（Windows AppContainer / Linux bubblewrap / macOS seatbelt，可断网）区分可信与不可信代码；另有结构化 `git` / `gh` 工具。
 
-对话 Agent 可以调用一个 `run_command` 工具在本机执行命令：
+### 笔记、题目与画布
 
-- **三套 shell**：Windows 默认 `pwsh`（可显式 `cmd`）；Linux / macOS 用 `bash`。
-- **默认关闭**：只有在「系统设置 → 命令执行」勾选开启后才会真正执行，否则工具直接返回错误。
-- **文件边界**：`cwd` 必须在应用数据目录（`<data_dir>`）内，默认 `<data_dir>/agent-files/<agent>/`；
-  越界路径走与 `read_file` 相同的词法规约 + canonicalize 校验并被拒绝。注意这是**工具层约定**：
-  命令继承当前用户权限，仍可读写用户有权访问的任意路径，不是操作系统级沙箱。
-- **网络**：`network=inherit`（默认）继承应用网络；`network=off` 在 Linux 用 `unshare -n`、
-  macOS 用 `sandbox-exec` 断网执行，Windows 没有用户态等价机制会**明确报错**（不静默降级）。
-- **运行护栏**：超时 1s–600s（默认 60s，到时强杀进程树）、命令长度上限 16KB。
-- **输出策略**：stdout/stderr **直接写入** `<data_dir>/logs/exec/*.out.log|*.err.log`（不经过内存管道），
-  工具只回传头 2KB + 尾 4KB 摘要与日志路径；需要看完整内容时用 `read_file` 的 `offset`/`limit`
-  （字节，单次 ≤64KB）分段读取。日志目录按 64MB / 200 文件上限自动清理旧文件。
-- **审计**：每次执行追加一行 JSON 到 `<data_dir>/logs/shell-audit.jsonl`（时间、agent、session、
-  shell、network、cwd、命令预览、退出码、是否超时、耗时）。
+- **Markdown 笔记**：自动保存 + 乐观并发、修订快照与回滚、粘贴 B 站链接生成带时间戳的视频锚点。
+- **题目练习**：基于已入库内容生成单选/多选/简答/论述题，本地批改与历史题集。
+- **思维导图与白板**：simple-mind-map 导图 + Excalidraw 白板，本地持久化。
 
-> 安全提示：`run_command` 的能力远大于 `write_file`。请只在明确需要时开启，并避免把
-> 不受信任的网页/文档内容直接交给 Agent 转成命令执行。
+### 科研工作台
 
-### git / gh 工具
+- **科研项目**：六阶段推进、计划、事件流；文献库（检索/导入/BibTeX 导出/引用核验）、稿件、数据集与实验记录。
+- **AI 辅助**：AI 选刊（匹配度 + 理由）、AI 研究计划（分阶段目标/交付物/风险，可逐项执行回填）、文献引用检查。
+- **写作与导入**：Google Docs 风格写作台（大纲/AI 续写/AI 润色/引用检查/导出），论文导入（PDF/DOCX/MD/TXT/TeX/HTML，自动拆章、Word 公式转 LaTeX、参考文献解析），原生 Word/PDF 版式预览优先。
+- **简历 / 幻灯片**：生成后作为产物卡片打开，可直接编辑或导出。
 
-除通用 `run_command` 外，同一开关下还提供两个结构化工具（不经过 shell 拼接参数）：
+### 自动化与更新
 
-- **`git`**：`status` / `diff`（可选 staged、stat、path）/ `log`（oneline，limit、path）/
-  `show`（rev，默认 HEAD）/ `branch` / `add`（paths 或 all）/ `commit`（message）。
-  `repo` 传仓库根的**绝对路径**（代码仓库通常不在数据目录内）；写操作只有 add / commit，
-  提示词要求仅在用户明确要求时使用。
-- **`gh`**：`auth_status` / `pr_list` / `pr_view` / `pr_diff` / `pr_checks` /
-  `issue_list` / `issue_view` / `pr_create`（title、body，可选 base、draft）。
-  通过本机 GitHub CLI 执行（需 `gh auth login`），工具本身不保存 token；列表/详情走
-  `--json` 结构化输出。`pr_create` 属写操作，只在用户明确要求时调用。
+- **自动化长任务**：AI 启动训练/构建/批处理并立即返回，日志按任务/日期落盘；后台调度器定期产出有界上下文，支持查看、重试、终止，应用重启自动标记中断任务。
+- **SSH 远程**：主机管理、xterm 交互终端、SFTP、本地端口转发、会话日志，跨平台凭据走系统钥匙串。
+- **内置更新器**：通过 GitHub Releases 的 `latest.json` 检查并签名校验更新。
 
-两个工具的每次调用同样写入 `<data_dir>/logs/shell-audit.jsonl`（含 `tool` 字段），
-并共享 `run_command` 的配置开关与输出/超时护栏。
+## 平台支持
 
-### 沙箱执行（run_sandboxed）
-
-需要运行不可信代码时，用 `run_sandboxed` 而不是 `run_command`——它把命令关进**操作系统级沙箱**
-（实现在独立 `src-tauri/src/sandbox/` 包：`mod.rs` 平台分派、`windows.rs` AppContainer、`unix.rs` bwrap/seatbelt；
-工具层只做参数与审计适配）：
-
-| 平台 | 后端 | 隔离 |
-|------|------|------|
-| Windows | AppContainer（每用户 profile `MindBase.Sandbox`，icacls 只授权沙箱目录） | 无网络（无 internetClient 能力）；文件只读写 `<data_dir>/agent-files/<agent>/sandbox/` + 系统目录只读 |
-| Linux | bubblewrap（`bwrap --unshare-net`） | 独立 net/pid 命名空间；只 bind 沙箱目录为可写 /work |
-| macOS | sandbox-exec（seatbelt） | deny network*；只允许系统目录只读与沙箱目录读写 |
-
-- 工作流：先用 `write_file` 把脚本写到相对路径 `sandbox/xxx.ps1`（= 沙箱目录），再用
-  `run_sandboxed` 执行；命令 cwd 固定为沙箱目录，**读不到数据目录、密钥库和用户文件**。
-- **网络可配**：默认 `network: "off"`（断网）。需要联网的代码（pip/npm 安装、调用 API）传
-  `network: "on"`：Windows 仅把 AppContainer 的 internetClient 能力加回 token（文件隔离不变），
-  Linux 去掉 `--unshare-net`，macOS 用 `allow network*`；仍只读写沙箱目录。
-- 注意：Windows AppContainer 不允许 loopback，因此沙箱内**不走应用里配置的本地代理**（127.0.0.1），
-  `network=on` 为直连；需要代理时请使用非 loopback 的代理地址。
-- Windows 支持 `pwsh`（powershell.exe，默认）与 `cmd`；Linux / macOS 只支持 `bash`。
-- 超时默认 120s（1s–600s），到点用 Job Object / 进程组强杀整棵进程树；
-  输出与 `run_command` 一致：stdout/stderr 直接写 `<data_dir>/logs/exec/` 日志文件，工具只回传头/尾摘要，
-  完整内容用 `read_file` 的 offset/limit 分段读取；每次执行写 `<data_dir>/logs/shell-audit.jsonl`（含 backend 字段）。
-- 未安装 bubblewrap 时 Linux 返回明确安装提示；Windows AppContainer 无需额外依赖。
-- 复用库调研（rappct / heel / skarn-sandbox / birdcage）与取舍见
-  [docs/desktop-rust-architecture.md](../docs/desktop-rust-architecture.md) §8；当前 Windows 后端为 windows-rs 自实现
-  （rappct 0.13 的启动路径在本机 Windows 11 25H2 稳定 E_INVALIDARG，未采用）。
-
-## ASR provider (云端 / 本地)
-
-语音转写支持两种模式，在「API 设置 → ASR 语音转写」卡片内切换：
-
-- **云端 API（DashScope）** — 默认。走 `asr` 槽的 Key / Base URL / 模型，未配置 Key 时回退
-  DashScope 密钥。
-- **本地部署（Whisper）** — 无需任何 API Key。应用通过自带的嵌入式 Python 自动安装
-  faster-whisper 依赖并启动 `scripts/whisper_server.py`（OpenAI 兼容接口），模型权重首次使用时
-  自动下载到 `<data_dir>/whisper-models`（默认走 hf-mirror.com 镜像并绕过系统代理，可用
-  `HF_ENDPOINT` 覆盖）。应用启动即拉起服务、退出时停止；入库时若云端 Key 缺失也会自动回退本地。
-  默认模型 `small`（CPU 友好），可在卡片中切换 tiny / base / medium / large-v3。
-
-## Vector store
-
-The vector store is built in and requires zero configuration: embeddings live in the `vectors`
-table of the same SQLite database as everything else, so they are stored under the active data
-directory and move together with 数据存储 relocation. Search is brute-force cosine similarity,
-which comfortably handles a personal knowledge base. The 系统状态 card shows the current chunk
-count (hover for the exact storage path); no external service is involved.
-
-## Knowledge base (入库 / 搜索 / 问答)
-
-The workspace turns favorited B站 videos into a searchable local knowledge base, mirroring the
-backend's production pipeline (`app/services/`):
-
-1. **入库** — 收藏夹 → 展开视频 → 入库。Per 分P: fetch the AI-conclusion outline (WBI-signed),
-   resolve the audio CDN URL (signed `playurl`, unsigned fallback), transcribe with DashScope
-   `paraformer-v2` (the cloud service pulls the CDN bytes directly; when the link is unreachable
-   the app downloads locally and uploads to DashScope's temporary OSS), chunk with the rule-based
-   semantic chunker (target 750 / max 900 / overlap 100 — ported from `chunking.py`), embed with
-   DashScope `text-embedding-v4` (1024-d), and store vectors + a `documents` row in one
-   transaction. Re-ingesting is delete-before-write; a failed 分P is marked and the run continues.
-2. **降级** — when ASR is unavailable the 分P still lands with title+description text
-   (`source = basic_info`), matching `content_fetcher.py`'s fallback.
-3. **搜索 / 对话** — the home view is a ChatGPT-style conversation workspace: a sidebar of
-   sessions (create / rename / delete, auto-titled from the first message with an LLM and
-   guarded so manual renames win) plus a streaming chat column. Each turn runs through the
-   local harness (`src-tauri/src/agent/harness/`): an orchestrator picks the agent (only `chat` is
-   routable today, matching production backend posture), a lifecycle layer gates it with
-   per-agent circuit breakers and per-session locks, and a registry-driven ReAct loop lets the
-   model call tools — `vector_search`, `list_documents`, `search_chat_history`,
-   `get_recent_context` / `get_full_history` / `get_compressed_summary`, the four note tools,
-   and `delegate_to_agent` (memory / note sub-agents, depth-capped at two levels with
-   consecutive-failure short-circuiting). Answers stream with 【视频标题】 citations; nested
-   agent steps render inline. A scheduler module (per-agent bounded queues with classified
-   retries) exists as scaffolding and currently carries the title-refinement job.
-4. **测验** — a manual quiz panel over ingested content: pick count / types (single & multi
-   choice, short answer, essay) / difficulty / optional topic, then answer inline. Generation
-   mirrors the backend's structured-output schemas including the essay→short_answer→
-   single_choice downgrade chain and low-confidence marking; grading is local for objective
-   types and LLM rubric scoring for essays.
-5. **笔记** — local markdown notebook with optimistic-concurrency autosave, revision snapshots
-   (backend 30%/10-minute policy), and video anchors that parse pasted B站 links down to the
-   timestamp. Stored content is plain markdown sanitized Rust-side (dangerous URL schemes
-   collapse to `#`, script/iframe blocks are dropped) before it ever touches SQLite.
-
-## Notes (笔记)
-
-A local markdown notebook under the 笔记 nav item: two-pane layout (searchable list with
-pinning on the left, editor on the right) with 编辑 / 预览 modes. Editing is one seamless
-plain-textarea surface over the raw markdown — native Ctrl+Z undo and Chinese IME composition
-work untouched; preview renders through react-markdown (GFM + soft line breaks). Editor
-shortcuts: Ctrl+B/I/`/K/Shift+X wrap the selection (bold, italic, code, link, strike),
-Ctrl+1/2/3 toggle headings, Ctrl+Shift+Q/L toggle quote/list, Enter continues lists and
-Tab/Shift+Tab indents, Ctrl+E swaps edit/preview and Ctrl+S saves now. Saves are debounced
-(800 ms) with optimistic concurrency — an outdated `updatedAt` surfaces a conflict state
-instead of overwriting. Revision snapshots follow the
-backend policy (change ≥30% after ≥10 minutes, char-bigram approximation, newest 20 kept per
-note) with one-click rollback. Video anchors parse pasted B站 links (bvid + p + t), fetch the
-video title, and jump straight back to the timestamp in the browser. Stored content is plain
-markdown sanitized Rust-side (dangerous URL schemes collapse to `#`, script/iframe blocks are
-dropped) before it ever touches SQLite.
-
-Requirements: a DashScope API key in API 设置 (used for ASR + embeddings; embeddings stay
-DashScope-only by design). 问答 additionally needs a conversational model — DashScope defaults to
-`qwen-flash` when unset, or an OpenRouter key with an explicit model. WBI signing is a local port
-of `app/services/wbi.py` (anonymous nav keys, 6h cache).
-
-## 测试布局
-
-测试分两层，避免端到端测试散落在每个源码文件里：
-
-| 层 | 位置 | 内容 |
+| 平台 | 状态 | 产物 / 说明 |
 |---|---|---|
-| 单元测试 | 源码内联 `#[cfg(test)] mod tests` | 纯函数 / 解析器 / 状态机（需要访问私有实现） |
-| 端到端（集成）测试 | **包内 `src-tauri/tests/`** | 工具执行、沙箱、文件系统、config/db、切块、Markdown 消毒、quiz 解析等跨模块行为 |
+| Windows x64 | ✅ 主要支持 | NSIS（currentUser，中/英）与 MSI；`run_sandboxed` 使用 AppContainer 隔离（文件仅沙箱目录 + 无网络/可选联网） |
+| macOS Apple Silicon | 🧪 Beta | `.dmg` 安装包与自动更新包（`.app.tar.gz`）；Keychain / seatbelt 已实现，仍建议备份数据后再升级 |
+| Linux x64 | 🧪 源码构建（未发布安装包） | 需要 WebKitGTK 等 Tauri 依赖与 bubblewrap；可按 `cross-platform.md` 自行构建 deb/rpm/AppImage |
 
-`tests/` 按域分包（每个子目录 `main.rs` 是 Cargo 自动发现的独立测试 crate）：
+## 快速开始
 
-```text
-tests/
-├── common/mod.rs        # 纯 std 共享辅助（临时目录 / 命令串 / 临时 git 仓库）
-├── toolkit/             # 非 agent：process / shell / git / gh（14）
-├── sandbox/             # 非 agent：AppContainer 隔离 + 网络策略（8，1 ignored）
-├── infra/               # 非 agent：执行日志摘要/分页/配额、config 开关（5）
-├── knowledge/           # 非 agent：文本切块（4）
-├── workspace/           # 非 agent：笔记 Markdown 消毒、quiz 解析（6）
-└── agent/               # 唯一使用 TestHarness：工具契约 / 注册表 / 门禁（7）
-```
-
-- 非 agent 测试直接调用 `pub mod toolkit` / `pub mod sandbox`，或经 `testing` 的只读包装
-  （`summarize_log` / `read_log_slice` / `prune_logs` / `chunk_text` / `sanitize_markdown` /
-  `parse_quiz_questions`）访问 `pub(crate)` 逻辑，**不初始化 harness**。
-- 运行：`cd src-tauri && cargo test`（全部）；只跑单测 `cargo test --lib`；
-  只跑某域 `cargo test --test toolkit` / `--test sandbox` / `--test infra` …
-- 新增端到端用例按域放进 `tests/<domain>/`；纯函数/私有实现单测仍留在源码内联（Rust 惯例）。
-
-## 自动化任务（长时任务）
-
-AI 可以用 `automation_start` 启动长任务（训练 / 构建 / 批处理），立即返回 `task_id`，不阻塞回合；
-日志按 **任务 / 日期 / run** 落 `<data_dir>/automation/<task_id>/<YYYY-MM-DD>/*.log`，数据库只存
-任务/运行/日志段指针/报告。后台调度器通过 `automation_due` 定期产出**有界上下文包**（状态 + 尾部 4KB +
-日志路径），模型用 `automation_status` / `automation_log_search` / `automation_log_read` 按需查看，
-失败可 `automation_retry`（受 max_attempts 限制），`automation_kill` 终止；应用重启会把遗留任务标记
-`interrupted`，不会误以为还在运行。`usage_stats` 统计近 N 天的输入/输出/缓存命中/合计 token（按模型、会话、天），
-详见 [docs/automation.md](../docs/automation.md)。
-
-## Prerequisites
-
-- Node.js >= 18
-- Rust toolchain (stable) plus the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/)
-  for your platform
-
-## Getting started
+前置：**Node.js ≥ 22**、**Rust stable（≥1.88）**、**Python 3**，以及对应平台的 [Tauri 2 依赖](https://tauri.app/start/prerequisites/)（Windows 需 MSVC toolchain；Linux 需 WebKitGTK 等）。三平台差异见 [docs/cross-platform.md](docs/cross-platform.md)。
 
 ```bash
-npm install
+git clone https://github.com/atoncooper/mind-base-desktop.git
+cd mind-base-desktop
 
-# REQUIRED before the first `tauri dev` / `tauri build`:
-# the FFmpeg sidecar binaries under src-tauri/binaries/ are gitignored and must
-# be provisioned locally.
-npm run fetch:ffmpeg
+npm ci
 
-npm run tauri dev    # run the desktop app in development mode
-npm run tauri build  # produce installers
+# FFmpeg / ffprobe sidecar：binaries/ 被 gitignore，首次运行/打包前必须准备
+npm run fetch:ffmpeg:win    # Windows（PowerShell 脚本下载/复制）
+npm run fetch:ffmpeg        # macOS / Linux（需系统已装 ffmpeg，或加 --source 指定目录）
+
+npm run tauri dev           # 开发运行（Vite devUrl http://localhost:1420）
+npm run tauri build         # 打包安装包（Windows NSIS/MSI、macOS dmg 等）
 ```
 
-## Scripts
+**数据与密钥都在本地**：默认数据目录为操作系统 App Data 下的应用目录，可在应用内「数据存储」迁移到任意文件夹（自带迁移/自愈）；笔记、向量、会话与模型 API Key 全部落在同一个 SQLite 数据库中。API Key 只在 Rust 层使用，UI 仅展示掩码预览，不写日志、不上传任何服务器。除模型供应商、B 站与 GitHub 更新检查外，应用不做外部网络请求。
 
-| Script                | Purpose                                                            |
-| --------------------- | ------------------------------------------------------------------ |
-| `npm run dev`         | Vite dev server for the frontend only                              |
-| `npm run build`       | Type-check (`tsc`) then production Vite bundle                     |
-| `npm run preview`     | Preview the built frontend                                         |
-| `npm run fetch:ffmpeg`| Provision FFmpeg/FFprobe sidecar binaries into `src-tauri/binaries/` |
-| `npm run tauri dev`   | Run the desktop app (requires `fetch:ffmpeg` first)                |
-| `npm run tauri build` | Package the desktop app (requires `fetch:ffmpeg` first)            |
+## 自动更新
 
-## Supply-chain note (TODO)
+应用通过 Tauri updater 检查本仓库 Release 中的 `latest.json`：
 
-The FFmpeg binaries provisioned by `scripts/fetch-ffmpeg.ps1` are not hash- or version-pinned yet.
-Pin known-good artifacts before distributing installers publicly; see the TODO at the top of that
-script.
+- endpoint：`https://github.com/atoncooper/mind-base-desktop/releases/latest/download/latest.json`（已写入 `src-tauri/tauri.conf.json`）；
+- 更新包用内置公钥做签名校验（`plugins.updater.pubkey`），Windows 以 passive 模式静默安装；
+- **发布 tag 约定为 `v<version>`**，且版本必须与 `src-tauri/tauri.conf.json` / `package.json` / `Cargo.toml` 一致；不一致时 Release workflow 会直接失败；
+- `latest.json` 由 Release workflow 自动生成/合并（`windows-x86_64`、`darwin-aarch64`、`darwin-x86_64` 条目）。
+
+## 持续集成与发布
+
+| Workflow | 触发 | 内容 |
+|---|---|---|
+| `ci.yml` | PR / push `main` | Windows + macOS 矩阵：`npm ci` → `npm run build` → Rust stable → `cargo check --all-targets --locked` → `cargo test --lib --locked`（CI 会创建占位 ffmpeg sidecar，不下载真实二进制） |
+| `release.yml` | push `v*` tag | 校验 tag 与 `tauri.conf.json` 版本一致 → 拉取 FFmpeg sidecar（Windows 用仓库脚本，macOS 用 ffmpeg-static release）→ `npm run tauri build`（带签名）→ Windows 创建 Release 并上传 NSIS/MSI + `latest.json`；macOS 等 Release 出现后上传 dmg 与 `.app.tar.gz`/`.sig` 并合并 darwin 更新条目；Release 正文优先使用仓库根 `RELEASE_NOTES_<version>.md` |
+
+仓库需要配置的 Actions secrets：
+
+- `TAURI_SIGNING_PRIVATE_KEY`：updater 私钥（对应 `tauri.conf.json` 的 `pubkey`；缺失会导致 `createUpdaterArtifacts` 构建失败）；
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：私钥口令（没有口令时留空仍建议显式设置）。
+
+`GITHUB_TOKEN` 由 Actions 内置，无需额外配置。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/overview.md](docs/overview.md) | 产品定位、功能清单、运行与打包、本仓库目录总览 |
+| [docs/cross-platform.md](docs/cross-platform.md) | Windows / macOS / Linux 构建前置、FFmpeg sidecar、系统凭据、Python 运行时与平台待办 |
+| [docs/rust-architecture.md](docs/rust-architecture.md) | Rust 分包架构、依赖方向、沙箱实现、测试分层、SSH 与联网搜索设计 |
+| [docs/automation.md](docs/automation.md) | 自动化长任务的目录/数据库、工具面、报告节奏、中断恢复与 token 统计 |
+
+## 与主项目的关系
+
+- Web 端：[atoncooper/MindBase](https://github.com/atoncooper/MindBase) —— 服务端多用户版本（账号、共享、云盘、会员等），需要部署服务。
+- 本仓库：MindBase 的本地单机版本，强调隐私、离线与零运维；功能与设计同源，但**数据与账号互不相通**，也不共享服务端数据库。
+- 桌面端的数据目录、SQLite schema 与升级迁移完全在本地完成；覆盖安装会自动迁移本地数据。
+
+## License
+
+[MIT](LICENSE) © 2026 via007

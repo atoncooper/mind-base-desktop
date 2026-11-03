@@ -46,7 +46,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYxNzQyNkJBQUZGRTc0NTcKUldSWGRQNnZ1aVowOFZTTy9uV2ZHN1podkxaMUdBNUtlVUwzSXVYY0tFT2RtN0tKTzFESHd6OFcK",
       "endpoints": [
-        "https://github.com/atoncooper/MindBase/releases/latest/download/latest.json"
+        "https://github.com/atoncooper/mind-base-desktop/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

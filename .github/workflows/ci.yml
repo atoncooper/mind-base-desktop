@@ -1,0 +1,76 @@
+name: CI
+
+# 桌面端 CI：PR 与 main 推送时在 Windows / macOS 上验证
+# 「前端能构建 + Rust 能编译 + 单元测试通过」。
+# Tauri 的 frontendDist 指向 ../dist，且 bundle.externalBin 声明了 ffmpeg/ffprobe
+# sidecar（binaries/ 被 gitignore），因此先构建前端、再创建占位 sidecar（仅校验
+# 文件存在性，不下载真实二进制），cargo check 才能通过。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Rust + frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build frontend (required by Tauri frontendDist)
+        run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Create placeholder sidecars (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force binaries | Out-Null
+          foreach ($name in @("ffmpeg", "ffprobe")) {
+            New-Item -ItemType File -Force "binaries/$name-x86_64-pc-windows-msvc.exe" | Out-Null
+          }
+
+      - name: Create placeholder sidecars (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          mkdir -p binaries
+          for name in ffmpeg ffprobe; do
+            touch "binaries/${name}-aarch64-apple-darwin"
+          done
+
+      - name: Cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets --locked
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test --lib --locked
