@@ -240,11 +240,12 @@ mod tests {
 
     #[test]
     fn pointer_target_accepts_absolute_path() {
-        let payload = r#"{"dataDir": "D:\\my data\\mindbase"}"#;
-        assert_eq!(
-            pointer_target(payload),
-            Some(PathBuf::from(r"D:\my data\mindbase"))
-        );
+        // Portable across platforms: build the payload from the OS temp dir so the
+        // test exercises "absolute path accepted" without assuming Windows drive
+        // letters (macOS/Linux reject `D:\...` as a relative path).
+        let dir = std::env::temp_dir().join("mindbase data");
+        let payload = serde_json::json!({ "dataDir": dir.display().to_string() }).to_string();
+        assert_eq!(pointer_target(&payload), Some(dir));
     }
 
     #[test]
@@ -260,11 +261,15 @@ mod tests {
 
     #[test]
     fn subdir_detection_is_component_wise() {
-        let parent = Path::new("D:\\data");
-        let child = Path::new("D:\\data\\nested");
-        let sibling_prefix = Path::new("D:\\database");
-        assert!(is_strict_subdir(child, parent));
-        assert!(!is_strict_subdir(sibling_prefix, parent));
-        assert!(!is_strict_subdir(parent, parent));
+        // Component-wise prefix compare: a sibling whose name starts with the same
+        // characters (e.g. `...-sibling` next to `...`) must not count as a child.
+        let parent = std::env::temp_dir().join("mindbase-data");
+        let child = parent.join("nested");
+        let mut sibling = parent.clone().into_os_string();
+        sibling.push("-sibling");
+        let sibling = PathBuf::from(sibling);
+        assert!(is_strict_subdir(&child, &parent));
+        assert!(!is_strict_subdir(&sibling, &parent));
+        assert!(!is_strict_subdir(&parent, &parent));
     }
 }
